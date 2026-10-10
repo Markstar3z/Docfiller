@@ -66,10 +66,15 @@ class QueueManager:
         while True:
             job = await self.queue.get()
             self.current_queue_job = job
+            stage = "starting"
             try:
+                stage = "notify_start"
                 await self.callbacks.on_job_started(job)
 
+                stage = "prepare_form"
                 result = await asyncio.to_thread(prepare_form, job.url, self.screenshot_dir)
+
+                stage = "save_prepared_application"
                 app_id = self.db.save_application(
                     url=result.url,
                     title=result.form_title,
@@ -78,39 +83,50 @@ class QueueManager:
                     screenshot_path=result.screenshot_path,
                 )
 
+                stage = "activate_job"
                 active = ActiveJob(url=job.url, chat_id=job.chat_id, prepare_result=result, application_id=app_id)
                 self.active_jobs[result.job_id] = active
 
                 if result.warning == "scam_warning":
+                    stage = "notify_scam_warning"
                     self.db.update_application_status(app_id, "blocked_scam")
                     await self.callbacks.on_scam_warning(active)
                     continue
 
                 if result.warning == "login_needed":
+                    stage = "notify_login_needed"
                     self.db.update_application_status(app_id, "login_needed")
                     await self.callbacks.on_login_needed(active)
                     continue
 
                 if result.warning == "wallet_connect_needed":
+                    stage = "notify_wallet_needed"
                     self.db.update_application_status(app_id, "manual_wallet_connect")
                     await self.callbacks.on_wallet_needed(active)
                     continue
 
                 if result.warning == "timeout":
+                    stage = "notify_timeout"
                     self.db.update_application_status(app_id, "timeout")
                     await self.callbacks.on_timeout(active)
                     continue
 
                 if result.warning == "captcha_found":
+                    stage = "captcha_wait"
                     event = asyncio.Event()
                     active.captcha_wait_event = event
                     await self.callbacks.on_captcha_needed(active)
                     await event.wait()
 
+                stage = "send_preview"
                 await self.callbacks.on_preview_ready(active)
 
             except Exception as exc:  # noqa: BLE001
-                await self.callbacks.on_job_crash(job, exc)
+                try:
+                    await self.callbacks.on_job_crash(job, exc, stage)
+                except Exception:
+                    # Never let the worker die because crash-report callback failed.
+                    pass
             finally:
                 self.current_queue_job = None
                 self.queue.task_done()
