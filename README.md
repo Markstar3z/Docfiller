@@ -1,6 +1,8 @@
 # Telegram Form Control Bot (Python)
 
-A Telegram bot that queues form links, runs your form engine, shows preview, and only submits after your tap unless auto submit is enabled.
+A Telegram control layer that queues form links, calls a form engine, shows a preview, and only submits after your tap unless auto submit is enabled.
+
+> The bundled `engine_adapter.py` is a simulator. It does not visit websites or submit real forms. Connect and test a site-aware engine before relying on this project for real applications.
 
 ## What is included
 
@@ -101,7 +103,7 @@ Test checklist:
 - Tap Edit, choose field, send new value
 - Preview refreshes after edit
 - Flagged fields prompt one-by-one
-- `/skip` works for optional flagged fields
+- `/skip` works for optional flagged fields (while answering that field)
 
 ### Step 5: Special situations
 
@@ -141,6 +143,8 @@ Keep bot code untouched and only replace internals in `engine_adapter.py`:
 - `cancel_job(job_id)`
 
 Return the same dataclass shapes.
+
+The real adapter must preserve a per-job browser/session until submission or cancellation, validate target URLs, detect unsafe prompts, and close resources for every terminal outcome.
 
 ## Safety notes
 
