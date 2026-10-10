@@ -6,8 +6,9 @@ The Telegram bot must only call these functions:
 - submit_form(job_id)
 - cancel_job(job_id)
 
-These are placeholder implementations so you can test full bot flow first.
-Replace internals later with your real Playwright engine calls.
+These are deliberately simulated implementations so the bot UI can be tested.
+They do not open websites or submit real forms. Replace their internals with a
+site-aware Playwright engine before using this bot for real applications.
 """
 
 from __future__ import annotations
@@ -174,6 +175,8 @@ def submit_form(job_id: str, screenshot_dir: str = "./screenshots") -> SubmitRes
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     proof_path = os.path.join(screenshot_dir, f"proof_{ts}_{job_id[:8]}.png")
     _ensure_demo_screenshot(proof_path)
+    # A real engine should close its browser/session here after a confirmed submit.
+    del _ACTIVE_JOBS[job_id]
     return SubmitResult(True, "Submission completed", proof_path)
 
 
