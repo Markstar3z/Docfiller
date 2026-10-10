@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import os
 import re
 from dataclasses import asdict
 from datetime import datetime
@@ -474,8 +475,29 @@ class BotHandlers:
 
     async def _send_chat_photo(self, chat_id: int, photo_path: str, caption: str, **kwargs) -> None:
         app = self.callbacks_app
-        with open(photo_path, "rb") as photo:
-            await app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, **kwargs)
+        try:
+            with open(photo_path, "rb") as photo:
+                await app.bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, **kwargs)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("send_photo failed, falling back to document: %s", self._mask_wallet(str(exc)))
+
+        # Fallback so preview flow doesn't crash if Telegram rejects photo format/size.
+        try:
+            with open(photo_path, "rb") as f:
+                filename = os.path.basename(photo_path) or "screenshot.png"
+                await app.bot.send_document(
+                    chat_id=chat_id,
+                    document=InputFile(f, filename=filename),
+                    caption=caption,
+                    **kwargs,
+                )
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("send_document fallback failed: %s", self._mask_wallet(str(exc)))
+
+        # Final safety net: never crash the job because media failed to send.
+        await app.bot.send_message(chat_id=chat_id, text=f"{caption}\n\nI couldn't send the screenshot, but the job is still active.")
 
     # The application object is injected from main.py after Application creation.
     callbacks_app: Application
@@ -518,7 +540,14 @@ class BotHandlers:
         detail = active.prepare_result.warning_detail or "unknown"
         await self._send_chat_text(active.chat_id, messages.SCAM_WARNING.format(detail=detail))
 
-    async def on_job_crash(self, job: QueueJob, exc: Exception) -> None:
-        safe_msg = self._mask_wallet(str(exc))
-        logger.exception("Job crashed for URL %s: %s", job.url, safe_msg)
-        await self._send_chat_text(job.chat_id, messages.CRASH_WARNING)
+    async def on_job_crash(self, job: QueueJob, exc: Exception, stage: str = "unknown") -> None:
+        raw = str(exc) or exc.__class__.__name__
+        safe_msg = self._mask_wallet(raw)
+        logger.exception("Job crashed at stage=%s for URL %s: %s", stage, job.url, safe_msg)
+
+        # Keep this short and human, but useful.
+        short = safe_msg.strip().replace("\n", " ")[:220]
+        await self._send_chat_text(
+            job.chat_id,
+            f"{messages.CRASH_WARNING}\nWhere: {stage}\nReason: {short}",
+        )
