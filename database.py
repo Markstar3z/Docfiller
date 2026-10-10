@@ -100,6 +100,31 @@ class Database:
                 (status, screenshot_path, application_id),
             )
 
+    def update_application(
+        self,
+        application_id: int,
+        *,
+        status: str,
+        answers: list[dict[str, Any]] | None = None,
+        screenshot_path: str | None = None,
+    ) -> None:
+        """Update the one durable record for a form job."""
+        with self.connect() as conn:
+            if answers is None:
+                conn.execute(
+                    "UPDATE applications SET status = ?, screenshot_path = COALESCE(?, screenshot_path) WHERE id = ?",
+                    (status, screenshot_path, application_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE applications
+                    SET status = ?, answers_json = ?, screenshot_path = COALESCE(?, screenshot_path)
+                    WHERE id = ?
+                    """,
+                    (status, json.dumps(answers, ensure_ascii=False), screenshot_path, application_id),
+                )
+
     def list_recent(self, limit: int = 10) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
