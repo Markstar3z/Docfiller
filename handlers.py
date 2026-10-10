@@ -10,6 +10,7 @@ import re
 from dataclasses import asdict
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.constants import ParseMode
@@ -55,7 +56,9 @@ class BotHandlers:
         app.add_handler(CommandHandler("cancel", self.cmd_cancel))
 
         app.add_handler(CallbackQueryHandler(self.on_callback))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.on_text_message))
+        # Keep this broad so `/skip` reaches the pending-answer flow. Registered
+        # command handlers above still receive their own commands first.
+        app.add_handler(MessageHandler(filters.TEXT, self.on_text_message))
 
     def _is_allowed(self, update: Update) -> bool:
         user = update.effective_user
@@ -70,6 +73,18 @@ class BotHandlers:
             return f"{value[:6]}...{value[-4:]}"
 
         return pattern.sub(repl, text)
+
+    @staticmethod
+    def _normalise_url(candidate: str) -> str | None:
+        """Remove prose punctuation and accept only usable HTTP(S) URLs."""
+        url = candidate.rstrip(".,;:!?")
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            return None
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or len(url) > 2048:
+            return None
+        return urlunsplit(parsed)
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_allowed(update):
@@ -210,28 +225,41 @@ class BotHandlers:
             job_id = pending_edit["job_id"]
             field_label = pending_edit["field_label"]
             if text == "/skip":
+                active = self.queue_manager.get_active_job(job_id)
+                field = next((f for f in active.prepare_result.fields if f.label == field_label), None) if active else None
+                if not field or not field.optional:
+                    await update.effective_message.reply_text("Only optional fields can be skipped.")
+                    return
                 new_answer = ""
             else:
-                if any(word in text.lower() for word in ["seed phrase", "private key"]):
+                unsafe_markers = ("seed phrase", "private key", "secret phrase", "recovery phrase", "mnemonic")
+                if any(word in text.lower() for word in unsafe_markers):
                     await update.effective_message.reply_text("🚨 I won't save that. Never share private keys or seed phrases.")
                     return
                 new_answer = text
 
             context.user_data.pop("awaiting_answer", None)
             await update.effective_message.reply_text(messages.UPDATED)
-            active = await self.queue_manager.apply_answer_edit(job_id, field_label, new_answer)
+            try:
+                active = await self.queue_manager.apply_answer_edit(job_id, field_label, new_answer)
+            except (KeyError, ValueError):
+                await update.effective_message.reply_text("That job is no longer active. Please start a new one.")
+                return
             await self.send_preview(update.effective_chat.id, active)
 
             await self._continue_flagged_prompt_if_needed(update, context, job_id)
             return
 
-        urls = URL_RE.findall(text)
+        urls = [normalised for match in URL_RE.findall(text) if (normalised := self._normalise_url(match))]
         if not urls:
             return
 
         await update.effective_message.reply_text(messages.ON_IT)
 
         for url in urls:
+            if self.queue_manager.is_url_pending(url, update.effective_chat.id):
+                await update.effective_message.reply_text("That URL is already queued or awaiting your action.")
+                continue
             if self.db.application_exists(url):
                 token = f"dup{len(self.pending_duplicate_urls)+1}_{abs(hash((url, datetime.utcnow().isoformat())))}"
                 self.pending_duplicate_urls[token] = url
@@ -266,8 +294,6 @@ class BotHandlers:
             token = data.split(":", 1)[1]
             url = self.pending_duplicate_urls.pop(token, None)
             if url:
-                fake_update = update
-                fake_update.callback_query = None
                 await self._enqueue_url(update, url)
             await q.edit_message_text("Okay, continuing with that URL.")
             return
@@ -318,12 +344,19 @@ class BotHandlers:
             return
 
         if data.startswith("pick:"):
-            _, job_id, idx_text = data.split(":", 2)
+            try:
+                _, job_id, idx_text = data.split(":", 2)
+                idx = int(idx_text)
+            except ValueError:
+                await q.message.reply_text("That edit button is invalid.")
+                return
             active = self.queue_manager.get_active_job(job_id)
             if not active:
                 await q.message.reply_text("This job is no longer active.")
                 return
-            idx = int(idx_text)
+            if idx < 0 or idx >= len(active.prepare_result.fields):
+                await q.message.reply_text("That field is no longer available.")
+                return
             field = active.prepare_result.fields[idx]
             context.user_data["awaiting_answer"] = {"job_id": job_id, "field_label": field.label}
             await q.message.reply_text(messages.ASK_NEW_ANSWER.format(field=field.label))
